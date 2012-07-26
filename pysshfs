@@ -19,7 +19,8 @@ import os
 import gtk
 
 ## print debug info ( True / False )
-DEBUG = False
+DEBUG = True
+
 
 class UI:
     def __init__(self):
@@ -29,8 +30,9 @@ class UI:
         self.window.set_position(gtk.WIN_POS_CENTER)
         self.window.connect("destroy", self.quit)
 
-        self.af = autofill();
+        self.af = autofill()
         (a_user, a_host, a_dir, a_mntpnt, a_port, a_open) = self.af.get_fill()
+
         # Containers
         BoxBase = gtk.VBox()
         #~ BoxBase.set_spacing(5)
@@ -203,7 +205,7 @@ class UI:
 
         Port = self.Port_entry.get_text()
 
-        if User == '' or Host == '' or Mountpoint =='' or Port =='':
+        if User == '' or Host == '' or Mountpoint == '' or Port == '':
             #!FixME
             debug_info('Error : please check your config')
             show_msg('Error : please check your config')
@@ -214,10 +216,19 @@ class UI:
         self.update_mountedfs()
 
         if ret[0] == 0:
-            self.af.set_fill(self.User_entry.get_text(),self.Host_entry.get_text(),self.Dir_entry.get_text(), \
-                             self.Mountpoint_entry.get_text(), self.Port_entry.get_text(),str(self.OpenDir_checkbox.get_active()))
+            self.af.set_fill(self.User_entry.get_text(),
+                self.Host_entry.get_text(),
+                self.Dir_entry.get_text(), \
+                self.Mountpoint_entry.get_text(),
+                self.Port_entry.get_text(),
+                str(self.OpenDir_checkbox.get_active())
+            )
+            debug_info("Everything should be setup now")
             if self.OpenDir_checkbox.get_active():
                 os.system('xdg-open %s' % Mountpoint)
+        elif ret[0] == -5:
+            new_passphrase = show_password_msg('Enter private key passphrase')
+            sshfs.update_passphrase(new_passphrase)
         else:
             show_msg(ret[1])
 
@@ -227,60 +238,97 @@ class UI:
     def quit(self, widget=None, data=None):
         gtk.main_quit()
 
-## Initialize the module.
+
 class sshFs:
     def __init__(self):
         ## Three responses we might expect.
-        self.Initial_Responses = ['Are you sure you want to continue connecting (yes/no)?',
-                                  'password:', pexpect.EOF]
+        #import re
+        #reg = re.compile('/^Enter passphrase for key')
+        self.initial_responses = [
+                                'Are you sure you want to continue connecting (yes/no)?',
+                                'password:', pexpect.EOF,
+                                ':', pexpect.EOF,
+                                'Enter passphrase for key'
+                                ]
+        self.child = None
 
-    def mount(self, User="", Password="", Host="", Dir="", Mountpoint="", Port=22, Timeout=120):
+    def mount(self, User="", Password="", Host="", Dir="", Mountpoint="", Port=22, Timeout=120, PrivateKey=None):
 
         Command = "sshfs -p %s %s@%s:%s %s" % (Port, User, Host, Dir, Mountpoint)
         debug_info("Command : %s" % Command)
 
-        child = pexpect.spawn(Command)
+        self.child = pexpect.spawn(Command)
+
+        #save password because we might need to send it again
+        self.password = Password
 
         ## Get the first response.
-        ret = child.expect (self.Initial_Responses, Timeout)
+        ret = self.child.expect(self.initial_responses, Timeout)
         ## The first reponse is to accept the key.
-        if ret==0:
+        if ret == 0:
             debug_info("The first reponse is to accept the key.")
-            #~ T = child.read(100)
-            child.sendline("yes")
-            child.expect('password:', Timeout)
-            child.sendline(Password)
+            #~ T = self.child.read(100)
+            self.child.sendline("yes")
+            self.child.expect('password:', Timeout)
+            self.child.sendline(Password)
         ## The second response sends the password.
         elif ret == 1:
             debug_info("The second response sends the password.")
-            child.sendline(Password)
-        # check for ssh bound mount - child exited and exitstatus=0
-        elif child.isalive() == False:
-            if child.exitstatus == 0:
+            self.child.sendline(Password)
+        # check for ssh bound mount - self.child exited and exitstatus=0
+        if ret == 5:
+            print debug_info("Apparently there's a ssh passphrase required")
+            debug_info("child before: %s" % self.child.before)
+            debug_info("child after: %s" % self.child.after)
+            passwrd = show_password_msg('Enter passphrase')
+            self.child.sendline(passwrd)
+            return self.mount(User, self.password, Host, Dir, Mountpoint, Port, Timeout, True)
+            #return (-5, "Enter privatekey password")
+        elif self.child.isalive() == False:
+            if self.child.exitstatus == 0:
                 return (0, "ssh-bound host mounted")
             else:
                 #this is wierd.. quit
                 return (-3, 'ERROR: Unknown')
         ## Otherwise, there is an error.
         else:
+            debug_info(ret)
             debug_info("Otherwise, there is an error.")
-            return (-3, 'ERROR: Unknown: ' + str(child.before))
+            return (-3, 'ERROR: Unknown: ' + str(self.child.before))
+
+        self.get_password()
+
+    def get_password(self, Timeout=120):
 
         ## Get the next response.
-        Possible_Responses = ['password:', pexpect.EOF]
-        ret = child.expect (Possible_Responses, Timeout)
+        Possible_Responses = ['password:']
+        ret = self.child.expect(Possible_Responses, Timeout)
 
         ## If it asks for a password, error.
+        debug_info('before: %s' % self.child.before)
+        debug_info('after: %s' % self.child.after)
+        debug_info('Return code: %s' % ret)
         if ret == 0:
-            debug_info("If it asks for a password, error.")
-            return (-4, 'ERROR: Incorrect password.')
+            self.child.sendline(self.password)
+            return(0, "Thanks")
+            #if ret1
+            #debug_info("If it asks for a password, error.")
+            #return (-4, 'ERROR: Incorrect password.')
         elif ret == 1:
             debug_info("Otherwise we are okay.")
-            return (0, str(child.after))
+            return (0, str(self.child.after))
             ## Otherwise we are okay.
         else:
             debug_info("Otherwise, there is an error.")
-            return (-3, 'ERROR: Unknown: ' + str(child.before))
+            return (-3, 'ERROR: Unknown: ' + str(self.child.before))
+        return (0, "Thanks")
+
+    def update_passphrase(self, new_passphrase):
+        #send passphrase to child
+        self.child.sendline(new_passphrase)
+        #continue the flow
+        self.get_password()
+
 
 class autofill:
     def __init__(self):
@@ -293,10 +341,10 @@ class autofill:
         self.a_open = ""
         debug_info("Conf file: " + homedir + "/.pysshfs")
         if os.path.exists(homedir + "/.pysshfs"):
-            f = open(homedir + "/.pysshfs");
+            f = open(homedir + "/.pysshfs")
             contents = f.read()
             f.close()
-            fields=contents.split("\n")
+            fields = contents.split("\n")
             self.a_user = fields[0]
             self.a_host = fields[1]
             self.a_dir = fields[2]
@@ -308,21 +356,24 @@ class autofill:
         return (self.a_user, self.a_host, self.a_dir, self.a_mntpnt, self.a_port, self.a_open)
 
     def set_fill(self, a_user, a_host, a_dir, a_mntpnt, a_port, a_open):
-        f = open(os.getenv("HOME") + "/.pysshfs","w")
+        f = open(os.getenv("HOME") + "/.pysshfs", "w")
         f.write("\n".join((a_user, a_host, a_dir, a_mntpnt, a_port, a_open)))
-        f.close() 
+        f.close()
+
 
 def show_msg(msg=' .. '):
     """  """
     message = gtk.MessageDialog(None, gtk.DIALOG_MODAL, gtk.MESSAGE_INFO, gtk.BUTTONS_OK, msg)
-    resp = message.run()
+    #resp = message.run()
+    message.run()
     message.destroy()
+
 
 def get_mounted_fs():
     """ get_mounted_fs() -> reads mtab and returns a list of mounted sshfs filesystems. """
     try:
         mounted_fs = []
-        lines = [line.strip("\n").split(" ") for line in open ("/etc/mtab", "r").readlines()]
+        lines = [line.strip("\n").split(" ") for line in open("/etc/mtab", "r").readlines()]
         for line in lines:
             if line[2] == "fuse.sshfs" and "user=%s" % os.getenv('USER') in line[3]:
                     mounted_fs.append((line[0], line[1]))
@@ -330,6 +381,27 @@ def get_mounted_fs():
     except:
         debug_info("Could not read mtab")
         show_msg("Could not read mtab .. :(")
+
+
+def show_password_msg(msg='Enter password'):
+        ## Password
+        message = gtk.MessageDialog(None, gtk.DIALOG_MODAL, gtk.MESSAGE_INFO, gtk.BUTTONS_OK, msg)
+        action_area = message.get_content_area()
+
+        Password_entry = gtk.Entry()
+        Password_entry.set_visibility(False)
+        label = gtk.Label('Password :')
+        label.set_alignment(0, 1)
+        action_area.pack_start(Password_entry)
+
+        message.show_all()
+        message.run()
+        password = Password_entry.get_text().decode('utf-8')
+        message.destroy()
+        return password
+
+
+
 
 def debug_info(msg):
     if DEBUG:
